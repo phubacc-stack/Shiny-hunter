@@ -27,7 +27,7 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-bot = commands.Bot(command_prefix=".", intents=intents)
+bot = commands.Bot(command_prefix="*", intents=intents)
 bot.remove_command("help")
 
 # ====== Configuration ======
@@ -109,7 +109,7 @@ class UnlockView(View):
             self.stop()
         else:
             await interaction.response.send_message(
-                "You don't have the 'unlock' role. Use `.unlock` instead.",
+                "You don't have the 'unlock' role. Use `*unlock` instead.",
                 ephemeral=True,
             )
 
@@ -122,19 +122,19 @@ class AdminMenu(View):
     @discord.ui.button(label="Blacklist Channel", style=discord.ButtonStyle.red)
     async def blacklist_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
-            "Use `.blacklist add #channel` or `.blacklist remove #channel`.", ephemeral=True
+            "Use `*blacklist add #channel` or `*blacklist remove #channel`.", ephemeral=True
         )
 
     @discord.ui.button(label="Set Log Channel", style=discord.ButtonStyle.blurple)
     async def log_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
-            "Use `.setlog #channel` to set the log channel.", ephemeral=True
+            "Use `*setlog #channel` to set the log channel.", ephemeral=True
         )
 
     @discord.ui.button(label="Manage Roles", style=discord.ButtonStyle.green)
     async def roles_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
-            "Use `.giverole @user <role>` or `.removerole @user <role>`.", ephemeral=True
+            "Use `*giverole @user <role>` or `*removerole @user <role>`.", ephemeral=True
         )
 
     @discord.ui.button(label="Locked Channels", style=discord.ButtonStyle.gray)
@@ -164,7 +164,6 @@ async def lock_channel(channel):
     await set_channel_permissions(channel, view_channel=False, send_messages=False)
     end_time = datetime.now() + timedelta(hours=lock_duration)
     lock_timers[channel.id] = end_time
-    # send unlock button
     unlock_role = discord.utils.get(channel.guild.roles, name="unlock")
     if unlock_role:
         for member in channel.guild.members:
@@ -212,30 +211,8 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Poketwo shiny catch
-    if message.author.id == POKETWO_ID and "these colors seem unusual" in message.content.lower():
-        embed = discord.Embed(
-            title="🎉 Shiny Catch!",
-            description=f"{message.content}",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        await message.channel.send(embed=embed)
-
-        log_id = get_log_channel_db()
-        if log_id:
-            log_channel = bot.get_channel(log_id)
-            if log_channel:
-                log_embed = discord.Embed(
-                    title="🎉 Shiny Catch Detected",
-                    description=f"{message.channel.mention} had a shiny catch: {message.content}",
-                    color=discord.Color.gold(),
-                    timestamp=datetime.now()
-                )
-                await log_channel.send(embed=log_embed)
-
     # Keyword detection
-    elif message.author.bot and contains_keyword(message) and message.channel.id not in blacklisted_channels:
+    if message.author.bot and contains_keyword(message) and message.channel.id not in blacklisted_channels:
         await lock_channel(message.channel)
 
     await bot.process_commands(message)
@@ -317,6 +294,12 @@ async def menu(ctx):
     """Show the interactive admin menu"""
     view = AdminMenu(ctx)
     await ctx.send("Admin Menu - use buttons for options", view=view)
+
+# ====== Owner Command ======
+@bot.command()
+async def owner(ctx):
+    """Shows the owner credit message."""
+    await ctx.send("Bot made by Buddy — happy hunting yall freaks ❤️")
 
 # ====== Flask Keep-Alive ======
 app = Flask('')
