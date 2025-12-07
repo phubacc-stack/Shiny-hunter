@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 import sqlite3
 import threading
+import random
 from flask import Flask
 
 # ====== Logging ======
@@ -18,14 +19,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is not set in environment variables.")
 
-POKETWO_ID = 716390085896962058  # Pokétwo User ID
+POKETWO_ID = 716390085896962058
 
 # ====== Intents ======
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
-bot = commands.Bot(command_prefix=".", intents=intents)
+bot = commands.Bot(command_prefix="*", intents=intents)
 bot.remove_command("help")
 
 # ====== Database ======
@@ -39,26 +40,45 @@ def get_db():
 def init_db():
     conn = get_db()
     conn.execute('CREATE TABLE IF NOT EXISTS blacklisted_channels (channel_id INTEGER PRIMARY KEY)')
+    conn.execute('CREATE TABLE IF NOT EXISTS blacklisted_categories (category_id INTEGER PRIMARY KEY)')
     conn.execute('CREATE TABLE IF NOT EXISTS log_channels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)')
     conn.execute('CREATE TABLE IF NOT EXISTS toggles (guild_id INTEGER PRIMARY KEY, keywords_enabled INTEGER)')
+    conn.execute('CREATE TABLE IF NOT EXISTS keywords (guild_id INTEGER, keyword TEXT, enabled INTEGER, PRIMARY KEY(guild_id, keyword))')
     conn.commit()
     conn.close()
 
 init_db()
 
-# ====== Helper Functions ======
-def is_keyword_message(msg_content):
-    keywords = ["rare ping", "collection pings", "shiny hunt pings"]
-    msg_lower = msg_content.lower()
-    return any(k.lower() in msg_lower for k in keywords)
+DEFAULT_KEYWORDS = ["rare ping", "collection pings", "shiny hunt pings"]
 
-def add_blacklist(channel_id):
+# ====== Helper Functions ======
+def is_keyword_enabled(guild_id, keyword):
+    conn = get_db()
+    cursor = conn.execute('SELECT enabled FROM keywords WHERE guild_id=? AND keyword=?', (guild_id, keyword))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row['enabled']) if row else True
+
+def set_keyword_toggle(guild_id, keyword, enabled):
+    conn = get_db()
+    conn.execute('INSERT OR REPLACE INTO keywords (guild_id, keyword, enabled) VALUES (?, ?, ?)', (guild_id, keyword, int(enabled)))
+    conn.commit()
+    conn.close()
+
+def is_keyword_message(msg_content, guild_id):
+    msg_lower = msg_content.lower()
+    for k in DEFAULT_KEYWORDS:
+        if k.lower() in msg_lower and is_keyword_enabled(guild_id, k):
+            return True
+    return False
+
+def add_blacklist_channel(channel_id):
     conn = get_db()
     conn.execute('INSERT OR IGNORE INTO blacklisted_channels (channel_id) VALUES (?)', (channel_id,))
     conn.commit()
     conn.close()
 
-def remove_blacklist(channel_id):
+def remove_blacklist_channel(channel_id):
     conn = get_db()
     conn.execute('DELETE FROM blacklisted_channels WHERE channel_id = ?', (channel_id,))
     conn.commit()
@@ -70,6 +90,25 @@ def get_blacklisted_channels():
     rows = cursor.fetchall()
     conn.close()
     return {row['channel_id'] for row in rows}
+
+def add_blacklist_category(category_id):
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO blacklisted_categories (category_id) VALUES (?)', (category_id,))
+    conn.commit()
+    conn.close()
+
+def remove_blacklist_category(category_id):
+    conn = get_db()
+    conn.execute('DELETE FROM blacklisted_categories WHERE category_id = ?', (category_id,))
+    conn.commit()
+    conn.close()
+
+def get_blacklisted_categories():
+    conn = get_db()
+    cursor = conn.execute('SELECT category_id FROM blacklisted_categories')
+    rows = cursor.fetchall()
+    conn.close()
+    return {row['category_id'] for row in rows}
 
 def set_log_channel(guild_id, channel_id):
     conn = get_db()
@@ -84,22 +123,9 @@ def get_log_channel(guild_id):
     conn.close()
     return row['channel_id'] if row else None
 
-def set_keywords_toggle(guild_id, enabled: bool):
-    conn = get_db()
-    conn.execute('INSERT OR REPLACE INTO toggles (guild_id, keywords_enabled) VALUES (?, ?)', (guild_id, int(enabled)))
-    conn.commit()
-    conn.close()
-
-def get_keywords_toggle(guild_id):
-    conn = get_db()
-    cursor = conn.execute('SELECT keywords_enabled FROM toggles WHERE guild_id = ?', (guild_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row['keywords_enabled']) if row else True
-
 # ====== Lock / Unlock ======
 lock_timers = {}
-lock_duration = 12  # in hours
+lock_duration = 12
 
 async def lock_channel(channel: discord.TextChannel):
     perms = channel.overwrites_for(channel.guild.get_member(POKETWO_ID))
@@ -107,7 +133,6 @@ async def lock_channel(channel: discord.TextChannel):
     perms.send_messages = False
     await channel.set_permissions(channel.guild.get_member(POKETWO_ID), overwrite=perms)
     lock_timers[channel.id] = datetime.now() + timedelta(hours=lock_duration)
-    # Create unlock button
     embed = discord.Embed(title="🔒 Channel Locked",
                           description=f"Locked for {lock_duration}h. Click unlock button when done.",
                           color=discord.Color.red(),
@@ -136,6 +161,96 @@ class UnlockView(View):
         await interaction.response.send_message("Channel unlocked!", ephemeral=True)
         self.stop()
 
+# ====== Interactive Menu with per-keyword toggles ======
+class SettingsView(View):
+    def __init__(self, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.add_item(SettingsSelect(ctx))
+
+class SettingsSelect(Select):
+    def __init__(self, ctx):
+        options = [
+            discord.SelectOption(label="Manage Keywords", description="Enable or disable each keyword individually"),
+            discord.SelectOption(label="Set Log Channel", description="Set the channel for logs"),
+            discord.SelectOption(label="Manage Blacklist", description="Add/remove channels or categories from blacklist")
+        ]
+        super().__init__(placeholder="Select a setting...", min_values=1, max_values=1, options=options)
+        self.ctx = ctx
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "Manage Keywords":
+            view = KeywordToggleView(self.ctx)
+            await interaction.response.send_message("Toggle individual keywords:", view=view, ephemeral=True)
+        elif choice == "Set Log Channel":
+            await interaction.response.send_message("Please mention the channel to set as log channel (example: #logs).", ephemeral=True)
+        elif choice == "Manage Blacklist":
+            channels = [discord.SelectOption(label=c.name, value=str(c.id)) for c in self.ctx.guild.text_channels]
+            categories = [discord.SelectOption(label=c.name, value=f"cat_{c.id}") for c in self.ctx.guild.categories]
+            view = BlacklistView(channels, categories, self.ctx)
+            await interaction.response.send_message("Select channels/categories to toggle blacklist:", view=view, ephemeral=True)
+
+class KeywordToggleView(View):
+    def __init__(self, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        options = []
+        for kw in DEFAULT_KEYWORDS:
+            enabled = is_keyword_enabled(ctx.guild.id, kw)
+            options.append(discord.SelectOption(label=kw, description=f"{'Enabled' if enabled else 'Disabled'}", value=kw))
+        self.add_item(KeywordSelect(options, ctx))
+
+class KeywordSelect(Select):
+    def __init__(self, options, ctx):
+        super().__init__(placeholder="Select keywords to toggle...", min_values=1, max_values=len(options), options=options)
+        self.ctx = ctx
+
+    async def callback(self, interaction: discord.Interaction):
+        for kw in self.values:
+            current = is_keyword_enabled(self.ctx.guild.id, kw)
+            set_keyword_toggle(self.ctx.guild.id, kw, not current)
+        await interaction.response.send_message(f"Toggled keywords: {', '.join(self.values)}", ephemeral=True)
+
+# ====== Blacklist Menu ======
+class BlacklistView(View):
+    def __init__(self, channels, categories, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.add_item(BlacklistSelect(channels + categories, ctx))
+
+class BlacklistSelect(Select):
+    def __init__(self, options, ctx):
+        super().__init__(placeholder="Select channels/categories...", min_values=1, max_values=len(options), options=options)
+        self.ctx = ctx
+
+    async def callback(self, interaction: discord.Interaction):
+        added = []
+        removed = []
+        for val in self.values:
+            if val.startswith("cat_"):
+                cat_id = int(val.split("_")[1])
+                if cat_id in get_blacklisted_categories():
+                    remove_blacklist_category(cat_id)
+                    removed.append(f"Category {cat_id}")
+                else:
+                    add_blacklist_category(cat_id)
+                    added.append(f"Category {cat_id}")
+            else:
+                ch_id = int(val)
+                if ch_id in get_blacklisted_channels():
+                    remove_blacklist_channel(ch_id)
+                    removed.append(f"<#{ch_id}>")
+                else:
+                    add_blacklist_channel(ch_id)
+                    added.append(f"<#{ch_id}>")
+        msg = ""
+        if added:
+            msg += "✅ Added to blacklist: " + ", ".join(added) + "\n"
+        if removed:
+            msg += "❌ Removed from blacklist: " + ", ".join(removed)
+        await interaction.response.send_message(msg, ephemeral=True)
+
 # ====== Events ======
 @bot.event
 async def on_ready():
@@ -148,7 +263,11 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.channel.id not in get_blacklisted_channels() and is_keyword_message(message.content) and get_keywords_toggle(message.guild.id):
+    blacklisted_channels = get_blacklisted_channels()
+    blacklisted_categories = get_blacklisted_categories()
+    if (message.channel.id not in blacklisted_channels
+        and (message.channel.category_id not in blacklisted_categories if message.channel.category_id else True)
+        and is_keyword_message(message.content, message.guild.id)):
         await lock_channel(message.channel)
         log_channel_id = get_log_channel(message.guild.id)
         if log_channel_id:
@@ -172,45 +291,50 @@ async def check_lock_timers():
 # ====== Commands ======
 @bot.command()
 async def lock(ctx):
-    """Lock current channel."""
     await lock_channel(ctx.channel)
     await ctx.send("🔒 Channel manually locked.")
 
 @bot.command()
 async def unlock(ctx):
-    """Unlock current channel."""
     await unlock_channel(ctx.channel, ctx.author)
     await ctx.send("🔓 Channel manually unlocked.")
 
 @bot.command()
-async def blacklist(ctx, action: str, channel: discord.TextChannel = None):
-    """Add or remove a channel from blacklist."""
-    if action.lower() == "add" and channel:
-        add_blacklist(channel.id)
-        await ctx.send(f"✅ {channel.mention} added to blacklist.")
-    elif action.lower() == "remove" and channel:
-        remove_blacklist(channel.id)
-        await ctx.send(f"✅ {channel.mention} removed from blacklist.")
+async def blacklist(ctx, action: str, target: str = None, category: str = None):
+    if action.lower() not in ["add", "remove"]:
+        await ctx.send("❌ Usage: `*blacklist add/remove #channel` or `*blacklist add/remove category <name>`")
+        return
+    if target and target.startswith("<#") and target.endswith(">"):
+        channel_id = int(target[2:-1])
+        if action.lower() == "add":
+            add_blacklist_channel(channel_id)
+            await ctx.send(f"✅ <#{channel_id}> added to blacklist.")
+        else:
+            remove_blacklist_channel(channel_id)
+            await ctx.send(f"✅ <#{channel_id}> removed from blacklist.")
+    elif category:
+        cat_obj = discord.utils.get(ctx.guild.categories, name=category)
+        if not cat_obj:
+            await ctx.send("❌ Category not found.")
+            return
+        if action.lower() == "add":
+            add_blacklist_category(cat_obj.id)
+            await ctx.send(f"✅ Category **{category}** added to blacklist.")
+        else:
+            remove_blacklist_category(cat_obj.id)
+            await ctx.send(f"✅ Category **{category}** removed from blacklist.")
     else:
-        await ctx.send("❌ Usage: `.blacklist add|remove #channel`")
+        await ctx.send("❌ Please specify a channel or category.")
 
 @bot.command()
 async def logchannel(ctx, channel: discord.TextChannel):
-    """Set a channel to send log messages to."""
     set_log_channel(ctx.guild.id, channel.id)
     await ctx.send(f"✅ Log channel set to {channel.mention}")
 
 @bot.command()
-async def togglekeywords(ctx, enabled: str):
-    """Enable or disable keyword detection."""
-    if enabled.lower() in ["on", "true"]:
-        set_keywords_toggle(ctx.guild.id, True)
-        await ctx.send("✅ Keyword detection enabled.")
-    elif enabled.lower() in ["off", "false"]:
-        set_keywords_toggle(ctx.guild.id, False)
-        await ctx.send("❌ Keyword detection disabled.")
-    else:
-        await ctx.send("❌ Usage: `.togglekeywords on|off`")
+async def menu(ctx):
+    view = SettingsView(ctx)
+    await ctx.send("Select a setting to configure:", view=view)
 
 @bot.command()
 async def owner(ctx):
@@ -218,19 +342,18 @@ async def owner(ctx):
 
 @bot.command()
 async def roll(ctx, sides: int = 6):
-    import random
     await ctx.send(f"🎲 You rolled: {random.randint(1, sides)}")
 
 @bot.command()
 async def help(ctx):
     embed = discord.Embed(title="Help Menu", color=discord.Color.blue())
-    embed.add_field(name=".lock", value="Lock current channel manually", inline=False)
-    embed.add_field(name=".unlock", value="Unlock current channel manually", inline=False)
-    embed.add_field(name=".blacklist add/remove #channel", value="Manage blacklist", inline=False)
-    embed.add_field(name=".logchannel #channel", value="Set log channel", inline=False)
-    embed.add_field(name=".togglekeywords on/off", value="Enable or disable keyword detection", inline=False)
-    embed.add_field(name=".roll <sides>", value="Roll dice", inline=False)
-    embed.add_field(name=".owner", value="Bot info", inline=False)
+    embed.add_field(name="*lock", value="Lock current channel manually", inline=False)
+    embed.add_field(name="*unlock", value="Unlock current channel manually", inline=False)
+    embed.add_field(name="*blacklist add/remove #channel or category <name>", value="Manage blacklist", inline=False)
+    embed.add_field(name="*logchannel #channel", value="Set log channel", inline=False)
+    embed.add_field(name="*menu", value="Interactive settings menu", inline=False)
+    embed.add_field(name="*roll <sides>", value="Roll dice", inline=False)
+    embed.add_field(name="*owner", value="Bot info", inline=False)
     await ctx.send(embed=embed)
 
 # ====== Flask Keep-Alive ======
