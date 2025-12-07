@@ -52,7 +52,19 @@ init_db()
 DEFAULT_KEYWORDS = ["rare ping", "collection pings", "shiny hunt pings"]
 
 # ====== Helper Functions ======
+def init_guild_keywords(guild_id):
+    """Ensure all default keywords exist for the guild and are enabled by default."""
+    conn = get_db()
+    for kw in DEFAULT_KEYWORDS:
+        conn.execute(
+            'INSERT OR IGNORE INTO keywords (guild_id, keyword, enabled) VALUES (?, ?, ?)',
+            (guild_id, kw, 1)  # default ON
+        )
+    conn.commit()
+    conn.close()
+
 def is_keyword_enabled(guild_id, keyword):
+    """Check if a keyword is enabled for a guild. Defaults to True."""
     conn = get_db()
     cursor = conn.execute('SELECT enabled FROM keywords WHERE guild_id=? AND keyword=?', (guild_id, keyword))
     row = cursor.fetchone()
@@ -60,12 +72,17 @@ def is_keyword_enabled(guild_id, keyword):
     return bool(row['enabled']) if row else True
 
 def set_keyword_toggle(guild_id, keyword, enabled):
+    """Enable or disable a keyword for a guild."""
     conn = get_db()
-    conn.execute('INSERT OR REPLACE INTO keywords (guild_id, keyword, enabled) VALUES (?, ?, ?)', (guild_id, keyword, int(enabled)))
+    conn.execute(
+        'INSERT OR REPLACE INTO keywords (guild_id, keyword, enabled) VALUES (?, ?, ?)',
+        (guild_id, keyword, int(enabled))
+    )
     conn.commit()
     conn.close()
 
 def is_keyword_message(msg_content, guild_id):
+    """Check if a message contains any enabled keywords."""
     msg_lower = msg_content.lower()
     for k in DEFAULT_KEYWORDS:
         if k.lower() in msg_lower and is_keyword_enabled(guild_id, k):
@@ -198,7 +215,11 @@ class KeywordToggleView(View):
         options = []
         for kw in DEFAULT_KEYWORDS:
             enabled = is_keyword_enabled(ctx.guild.id, kw)
-            options.append(discord.SelectOption(label=kw, description=f"{'Enabled' if enabled else 'Disabled'}", value=kw))
+            options.append(discord.SelectOption(
+                label=kw,
+                description=f"{'Enabled' if enabled else 'Disabled'}",
+                value=kw
+            ))
         self.add_item(KeywordSelect(options, ctx))
 
 class KeywordSelect(Select):
@@ -207,10 +228,15 @@ class KeywordSelect(Select):
         self.ctx = ctx
 
     async def callback(self, interaction: discord.Interaction):
+        toggled_keywords = []
         for kw in self.values:
             current = is_keyword_enabled(self.ctx.guild.id, kw)
             set_keyword_toggle(self.ctx.guild.id, kw, not current)
-        await interaction.response.send_message(f"Toggled keywords: {', '.join(self.values)}", ephemeral=True)
+            toggled_keywords.append(f"{kw} ({'ON' if not current else 'OFF'})")
+        await interaction.response.send_message(
+            f"Toggled keywords: {', '.join(toggled_keywords)}",
+            ephemeral=True
+        )
 
 # ====== Blacklist Menu ======
 class BlacklistView(View):
@@ -255,6 +281,8 @@ class BlacklistSelect(Select):
 @bot.event
 async def on_ready():
     logging.info(f"Bot online as {bot.user}")
+    for guild in bot.guilds:
+        init_guild_keywords(guild.id)  # Initialize keywords default ON
     if not check_lock_timers.is_running():
         check_lock_timers.start()
 
