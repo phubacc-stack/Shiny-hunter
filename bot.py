@@ -105,9 +105,10 @@ async def set_channel_permissions(channel, view_channel=None, send_messages=None
     overwrite.send_messages = send_messages if send_messages is not None else True
     await channel.set_permissions(poketwo, overwrite=overwrite)
 
-async def lock_channel(channel):
+async def lock_channel(channel, hours=None):
+    """Lock a channel for a given number of hours (default = lock_duration)."""
     await set_channel_permissions(channel, view_channel=False, send_messages=False)
-    end_time = datetime.now() + timedelta(hours=lock_duration)
+    end_time = datetime.now() + timedelta(hours=hours if hours else lock_duration)
     lock_timers[channel.id] = end_time
 
 async def unlock_channel(channel, user):
@@ -149,6 +150,7 @@ async def on_message(message):
         if message.author == bot.user:
             return
 
+        # Auto-lock shiny messages
         if message.author.bot and is_shiny_message(message):
             if message.channel.id not in blacklisted_channels:
                 await lock_channel(message.channel)
@@ -158,7 +160,11 @@ async def on_message(message):
                     color=discord.Color.red(),
                     timestamp=datetime.now(),
                 )
-                embed.add_field(name="Lock Timer Ends At", value=(datetime.now() + timedelta(hours=lock_duration)).strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+                embed.add_field(
+                    name="Lock Timer Ends At",
+                    value=(datetime.now() + timedelta(hours=lock_duration)).strftime("%Y-%m-%d %H:%M:%S"),
+                    inline=False
+                )
                 embed.set_footer(text="Use the unlock button or `.unlock` to restore access.")
                 view = UnlockView(channel=message.channel)
                 await message.channel.send(embed=embed, view=view)
@@ -178,6 +184,20 @@ async def check_lock_timers():
             await unlock_channel(channel, bot.user)
             logging.info(f"Channel {channel.name} automatically unlocked.")
         lock_timers.pop(cid, None)
+
+# ====== Manual Lock/Unlock Commands ======
+@bot.command()
+@commands.has_role("unlock")
+async def lock(ctx, hours: int = None):
+    """Manually lock the current channel for a given number of hours (defaults to lock_duration)."""
+    await lock_channel(ctx.channel, hours)
+    await ctx.send(f"🔒 Channel locked manually for {hours if hours else lock_duration} hours.")
+
+@bot.command()
+@commands.has_role("unlock")
+async def unlock(ctx):
+    """Manually unlock the current channel."""
+    await unlock_channel(ctx.channel, ctx.author)
 
 # ====== Flask Keep-Alive ======
 app = Flask('')
