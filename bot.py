@@ -170,11 +170,11 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot and contains_keyword(message):
 
-        # If channel is blacklisted
+        # Channel blacklist
         if message.channel.id in blacklisted_channels:
             return
 
-        # If category is blacklisted → ALL channels inside count
+        # Category blacklist
         if message.channel.category_id in blacklisted_categories:
             return
 
@@ -194,94 +194,90 @@ async def lock_timer_task():
             await unlock_channel(channel, bot.user)
         lock_timers.pop(cid, None)
 
-# ===== Commands =====
-# --- BLACKLIST ---
+# ===== BLACKLIST COMMAND =====
 @bot.command()
 @is_admin()
-async def blacklist(ctx, mode=None, target=None):
+async def blacklist(ctx, mode=None, action=None, *, target=None):
     global blacklisted_channels, blacklisted_categories
 
     if mode is None:
-        await ctx.send("Usage:\n`*blacklist add #channel`\n`*blacklist remove #channel`\n`*blacklist list`")
+        await ctx.send(
+            "Usage:\n"
+            "`*blacklist channel add #channel`\n"
+            "`*blacklist channel remove #channel`\n"
+            "`*blacklist channel list`\n"
+            "`*blacklist category add <name>`\n"
+            "`*blacklist category remove <name>`\n"
+            "`*blacklist category list`"
+        )
         return
 
-    # CATEGORY MODE
+    # CATEGORY
     if mode.lower() == "category":
-        await ctx.send("Use:\n`*blacklist category add <name>`\n`*blacklist category remove <name>`\n`*blacklist category list`")
-        return
-
-    # HANDLE CATEGORY COMMANDS
-    if ctx.invoked_with == "blacklist" and mode.lower() == "category":
-        pass
-
-# --- CATEGORY BLACKLIST ---
-@bot.command(name="blacklist_category")
-async def blacklist_category(ctx, action=None, *, category_name=None):
-    global blacklisted_categories
-
-    if action is None:
-        await ctx.send("Usage: `*blacklist category add/remove/list <category>`")
-        return
-
-    if action.lower() == "list":
-        if not blacklisted_categories:
-            await ctx.send("No categories blacklisted.")
+        if action is None:
+            await ctx.send("Usage: `*blacklist category add/remove/list <category>`")
             return
-        names = []
-        for cid in blacklisted_categories:
-            cat = discord.utils.get(ctx.guild.categories, id=cid)
-            if cat:
-                names.append(cat.name)
-        await ctx.send("📜 Blacklisted Categories:\n" + "\n".join(names))
-        return
 
-    category = discord.utils.get(ctx.guild.categories, name=category_name)
-    if not category:
-        await ctx.send("❌ Category not found.")
-        return
-
-    if action.lower() == "add":
-        blacklisted_categories.add(category.id)
-        add_to_blacklist(category_id=category.id)
-        await ctx.send(f"✅ Category `{category.name}` blacklisted.")
-    elif action.lower() == "remove":
-        blacklisted_categories.discard(category.id)
-        remove_from_blacklist(category_id=category.id)
-        await ctx.send(f"✅ Category `{category.name}` removed.")
-
-# --- CHANNEL BLACKLIST ---
-@bot.command()
-@is_admin()
-async def blacklist(ctx, action=None, channel: discord.TextChannel = None):
-    global blacklisted_channels
-
-    if action is None:
-        await ctx.send("Usage: `*blacklist add #channel`, `*blacklist remove #channel`, `*blacklist list`")
-        return
-
-    if action.lower() == "list":
-        if not blacklisted_channels:
-            await ctx.send("No channels blacklisted.")
+        if action.lower() == "list":
+            if not blacklisted_categories:
+                await ctx.send("No categories blacklisted.")
+                return
+            names = []
+            for cid in blacklisted_categories:
+                cat = discord.utils.get(ctx.guild.categories, id=cid)
+                if cat:
+                    names.append(cat.name)
+            await ctx.send("📜 Blacklisted Categories:\n" + "\n".join(names))
             return
-        items = [f"<#{cid}>" for cid in blacklisted_channels]
-        await ctx.send("📜 Blacklisted Channels:\n" + "\n".join(items))
+
+        category = discord.utils.get(ctx.guild.categories, name=target)
+        if not category:
+            await ctx.send("❌ Category not found.")
+            return
+
+        if action.lower() == "add":
+            blacklisted_categories.add(category.id)
+            add_to_blacklist(category_id=category.id)
+            await ctx.send(f"✅ Category `{category.name}` blacklisted.")
+        elif action.lower() == "remove":
+            blacklisted_categories.discard(category.id)
+            remove_from_blacklist(category_id=category.id)
+            await ctx.send(f"✅ Category `{category.name}` removed.")
         return
 
-    if channel is None:
-        await ctx.send("❌ You must mention a channel.")
+    # CHANNEL
+    if mode.lower() == "channel":
+        if action is None:
+            await ctx.send("Usage: `*blacklist channel add/remove/list #channel`")
+            return
+
+        if action.lower() == "list":
+            if not blacklisted_channels:
+                await ctx.send("No channels blacklisted.")
+                return
+            items = [f"<#{cid}>" for cid in blacklisted_channels]
+            await ctx.send("📜 Blacklisted Channels:\n" + "\n".join(items))
+            return
+
+        channel = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else None
+
+        if channel is None:
+            await ctx.send("❌ You must mention a channel.")
+            return
+
+        if action.lower() == "add":
+            blacklisted_channels.add(channel.id)
+            add_to_blacklist(channel_id=channel.id)
+            await ctx.send(f"✅ Channel {channel.mention} blacklisted.")
+        elif action.lower() == "remove":
+            blacklisted_channels.discard(channel.id)
+            remove_from_blacklist(channel_id=channel.id)
+            await ctx.send(f"✅ Channel {channel.mention} removed.")
         return
 
-    if action.lower() == "add":
-        blacklisted_channels.add(channel.id)
-        add_to_blacklist(channel_id=channel.id)
-        await ctx.send(f"✅ Channel {channel.mention} blacklisted.")
+    await ctx.send("❌ Invalid mode. Use `channel` or `category`.")
 
-    elif action.lower() == "remove":
-        blacklisted_channels.discard(channel.id)
-        remove_from_blacklist(channel_id=channel.id)
-        await ctx.send(f"✅ Channel {channel.mention} removed.")
-
-# --- Admin Commands ---
+# ===== OTHER COMMANDS =====
 @bot.command()
 @is_admin()
 async def setlog(ctx, channel: discord.TextChannel):
@@ -311,7 +307,6 @@ async def lock(ctx, channel: discord.TextChannel):
 async def unlock(ctx, channel: discord.TextChannel):
     await unlock_channel(channel, ctx.author)
 
-# --- Owner Command ---
 @bot.command()
 @is_owner()
 async def botstatus(ctx):
@@ -320,15 +315,14 @@ async def botstatus(ctx):
     embed.add_field(name="Server List", value="\n".join([g.name for g in bot.guilds]), inline=False)
     await ctx.send(embed=embed)
 
-# --- Help ---
 @bot.command()
 async def help(ctx):
     embed = discord.Embed(title="Bot Commands", color=discord.Color.green())
     embed.add_field(
         name="Blacklist",
-        value="`*blacklist add #channel`\n"
-              "`*blacklist remove #channel`\n"
-              "`*blacklist list`\n"
+        value="`*blacklist channel add #channel`\n"
+              "`*blacklist channel remove #channel`\n"
+              "`*blacklist channel list`\n"
               "`*blacklist category add <name>`\n"
               "`*blacklist category remove <name>`\n"
               "`*blacklist category list`",
@@ -347,7 +341,7 @@ async def help(ctx):
     embed.set_footer(text="Bot made by Buddy ❤️")
     await ctx.send(embed=embed)
 
-# ===== Flask =====
+# ===== Flask Keep-Alive =====
 app = Flask('')
 
 @app.route('/')
@@ -359,5 +353,5 @@ def run_flask():
 
 threading.Thread(target=run_flask).start()
 
-# ===== Run =====
+# ===== Run Bot =====
 bot.run(BOT_TOKEN)
