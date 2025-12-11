@@ -63,8 +63,10 @@ def add_to_blacklist(channel_id=None, category_id=None):
     conn = get_db()
     if channel_id:
         conn.execute("INSERT OR IGNORE INTO blacklisted_channels VALUES (?)", (channel_id,))
+        blacklisted_channels.add(channel_id)
     if category_id:
         conn.execute("INSERT OR IGNORE INTO blacklisted_categories VALUES (?)", (category_id,))
+        blacklisted_categories.add(category_id)
     conn.commit()
     conn.close()
 
@@ -72,8 +74,10 @@ def remove_from_blacklist(channel_id=None, category_id=None):
     conn = get_db()
     if channel_id:
         conn.execute("DELETE FROM blacklisted_channels WHERE channel_id=?", (channel_id,))
+        blacklisted_channels.discard(channel_id)
     if category_id:
         conn.execute("DELETE FROM blacklisted_categories WHERE category_id=?", (category_id,))
+        blacklisted_categories.discard(category_id)
     conn.commit()
     conn.close()
 
@@ -258,16 +262,48 @@ class AdminMenu(View):
             channel = ctx.guild.get_channel(cid)
             if channel:
                 self.add_item(UnlockView(channel))
-        # Blacklisted channels buttons
-        for cid in blacklisted_channels:
+        # Blacklisted channels
+        for cid in list(blacklisted_channels):
             ch = ctx.guild.get_channel(cid)
             if ch:
-                self.add_item(Button(label=f"Unblacklist {ch.name}", style=discord.ButtonStyle.red, custom_id=f"unblacklist_channel_{cid}"))
-        # Blacklisted categories buttons
-        for cid in blacklisted_categories:
+                button = Button(label=f"Unblacklist {ch.name}", style=discord.ButtonStyle.red)
+                async def unblacklist_ch(interaction, cid=cid):
+                    remove_from_blacklist(channel_id=cid)
+                    await interaction.response.send_message(f"Channel {ch.mention} removed from blacklist.", ephemeral=True)
+                    await ctx.invoke(bot.get_command("admin"))
+                button.callback = unblacklist_ch
+                self.add_item(button)
+        # Blacklisted categories
+        for cid in list(blacklisted_categories):
             cat = discord.utils.get(ctx.guild.categories, id=cid)
             if cat:
-                self.add_item(Button(label=f"Unblacklist {cat.name}", style=discord.ButtonStyle.red, custom_id=f"unblacklist_category_{cid}"))
+                button = Button(label=f"Unblacklist {cat.name}", style=discord.ButtonStyle.red)
+                async def unblacklist_cat(interaction, cid=cid):
+                    remove_from_blacklist(category_id=cid)
+                    await interaction.response.send_message(f"Category `{cat.name}` removed from blacklist.", ephemeral=True)
+                    await ctx.invoke(bot.get_command("admin"))
+                button.callback = unblacklist_cat
+                self.add_item(button)
+        # Add button to blacklist current channel
+        button_add_channel = Button(label="Blacklist Current Channel", style=discord.ButtonStyle.grey)
+        async def add_channel(interaction):
+            add_to_blacklist(channel_id=ctx.channel.id)
+            await interaction.response.send_message(f"Channel {ctx.channel.mention} added to blacklist.", ephemeral=True)
+            await ctx.invoke(bot.get_command("admin"))
+        button_add_channel.callback = add_channel
+        self.add_item(button_add_channel)
+        # Add button to blacklist category
+        button_add_category = Button(label="Blacklist Current Category", style=discord.ButtonStyle.grey)
+        async def add_category(interaction):
+            cat = ctx.channel.category
+            if cat:
+                add_to_blacklist(category_id=cat.id)
+                await interaction.response.send_message(f"Category `{cat.name}` added to blacklist.", ephemeral=True)
+                await ctx.invoke(bot.get_command("admin"))
+            else:
+                await interaction.response.send_message("This channel has no category.", ephemeral=True)
+        button_add_category.callback = add_category
+        self.add_item(button_add_category)
 
 # ===== Commands =====
 @bot.command()
@@ -309,6 +345,58 @@ async def lock(ctx, channel: discord.TextChannel):
 @is_admin()
 async def unlock(ctx, channel: discord.TextChannel):
     await unlock_channel(channel, ctx.author)
+
+@bot.command()
+@is_admin()
+async def blacklist(ctx, mode=None, action=None, *, target=None):
+    if mode is None:
+        await ctx.send("Usage: `*blacklist channel/category add/remove/list <name>`")
+        return
+    mode = mode.lower()
+    action = (action.lower() if action else None)
+
+    # Channel blacklist
+    if mode == "channel":
+        if action == "list":
+            await ctx.send("📜 Blacklisted Channels:\n" + "\n".join(f"<#{cid}>" for cid in blacklisted_channels) or "None")
+            return
+        if not target:
+            await ctx.send("❌ You must provide a channel mention.")
+            return
+        ch = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else None
+        if not ch:
+            await ctx.send("❌ Invalid channel mention.")
+            return
+        if action == "add":
+            add_to_blacklist(channel_id=ch.id)
+            await ctx.send(f"✅ Channel {ch.mention} blacklisted.")
+        elif action == "remove":
+            remove_from_blacklist(channel_id=ch.id)
+            await ctx.send(f"✅ Channel {ch.mention} removed from blacklist.")
+        return
+
+    # Category blacklist
+    if mode == "category":
+        if action == "list":
+            names = [discord.utils.get(ctx.guild.categories, id=cid).name for cid in blacklisted_categories if discord.utils.get(ctx.guild.categories, id=cid)]
+            await ctx.send("📜 Blacklisted Categories:\n" + "\n".join(names) or "None")
+            return
+        if not target:
+            await ctx.send("❌ You must provide a category name.")
+            return
+        cat = discord.utils.get(ctx.guild.categories, name=target)
+        if not cat:
+            await ctx.send("❌ Category not found.")
+            return
+        if action == "add":
+            add_to_blacklist(category_id=cat.id)
+            await ctx.send(f"✅ Category `{cat.name}` blacklisted.")
+        elif action == "remove":
+            remove_from_blacklist(category_id=cat.id)
+            await ctx.send(f"✅ Category `{cat.name}` removed from blacklist.")
+        return
+
+    await ctx.send("❌ Invalid mode. Use `channel` or `category`.")
 
 @bot.command()
 @is_owner()
